@@ -1,0 +1,5 @@
+{
+  "name": "AI video Detector",
+  "description": "Find deep fake videos",
+  "requestFramePermissions": []
+}
