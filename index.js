@@ -1,10 +1,10 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 import html2canvas from 'html2canvas';
 
 const uploadArea = document.getElementById('upload-area');
-const videoUpload = document.getElementById('video-upload');
+const mediaUpload = document.getElementById('media-upload');
 const videoPreview = document.getElementById('video-preview');
+const audioPreview = document.getElementById('audio-preview');
 const analyzeButton = document.getElementById('analyze-button');
 const startOverButton = document.getElementById('start-over-button');
 const loader = document.getElementById('loader');
@@ -22,14 +22,15 @@ const shareButton = document.getElementById('share-button');
 const downloadButton = document.getElementById('download-button');
 
 
-let videoFile = null;
+let mediaFile = null;
+let currentFileType = null; 
 let extractedFramesData = [];
 let analysisResult = null;
 
-const ai = new GoogleGenAI({ apiKey: "YOUR API KEY" });
+const ai = new GoogleGenAI({ apiKey: "AIzaSyAkuDOerSFcd9iKspmSthRkHy6M5AzvNhw" });
 const model = 'gemini-2.5-flash';
 
-videoUpload.addEventListener('change', handleFileSelect);
+mediaUpload.addEventListener('change', handleFileSelect);
 uploadArea.addEventListener('dragover', handleDragOver);
 uploadArea.addEventListener('dragleave', handleDragLeave);
 uploadArea.addEventListener('drop', handleFileDrop);
@@ -39,15 +40,6 @@ copyButton.addEventListener('click', copyResultsToClipboard);
 shareButton.addEventListener('click', handleShareClick);
 downloadButton.addEventListener('click', handleDownloadReportClick);
 
-/**
- * Wraps the Gemini API call with an intelligent retry mechanism.
- * @param {object} request The request object for generateContent.
- * @param {object} options Options for retrying.
- * @param {number} options.maxRetries Maximum number of retries.
- * @param {number} options.initialDelay Starting delay in ms.
- * @param {function} options.onRetry Callback function when a retry occurs.
- * @returns {Promise<GenerateContentResponse>}
- */
 async function generateContentWithRetry(request, options = {}) {
     const { maxRetries = 3, initialDelay = 1000, onRetry } = options;
     let delay = initialDelay;
@@ -55,7 +47,6 @@ async function generateContentWithRetry(request, options = {}) {
         try {
             return await ai.models.generateContent(request);
         } catch (error) {
-            // Check for a specific 503 "overloaded" error to retry.
             if (error.message.includes('503') || error.message.toLowerCase().includes('overloaded')) {
                 if (i === maxRetries - 1) {
                     throw new Error(`The model is overloaded and failed to respond after ${maxRetries} attempts.`);
@@ -66,7 +57,6 @@ async function generateContentWithRetry(request, options = {}) {
                 await new Promise(resolve => setTimeout(resolve, delay));
                 delay *= 2; // Exponential backoff
             } else {
-                // Not a retryable error, re-throw immediately.
                 throw error;
             }
         }
@@ -92,18 +82,22 @@ function handleFileDrop(event) {
 }
 
 async function processFile(file) {
-    if (!file.type.startsWith('video/')) {
-        alert('Please upload a valid video file.');
+    if (file.type.startsWith('video/')) {
+        currentFileType = 'video';
+        await processVideoFile(file);
+    } else if (file.type.startsWith('audio/')) {
+        currentFileType = 'audio';
+        processAudioFile(file);
+    } else {
+        alert('Please upload a valid video or audio file.');
         return;
     }
-    videoFile = file;
+}
 
-    if (videoPreview.src) {
-        URL.revokeObjectURL(videoPreview.src);
-    }
-    
-    const videoURL = URL.createObjectURL(file);
-
+async function processVideoFile(file) {
+    mediaFile = file;
+    if (videoPreview.src) URL.revokeObjectURL(videoPreview.src);
+    const fileURL = URL.createObjectURL(file);
     try {
         await new Promise((resolve, reject) => {
             const handleCanPlay = () => {
@@ -116,13 +110,13 @@ async function processFile(file) {
                 videoPreview.removeEventListener('error', handleError);
                 reject(new Error('The video file could not be loaded. It might be corrupt or in an unsupported format.'));
             };
-
             videoPreview.addEventListener('canplay', handleCanPlay);
             videoPreview.addEventListener('error', handleError);
-            videoPreview.src = videoURL;
+            videoPreview.src = fileURL;
         });
 
         uploadArea.classList.add('hidden');
+        audioPreview.classList.remove('visible');
         videoPreview.classList.add('visible');
         videoPreview.currentTime = 0;
         analyzeButton.disabled = false;
@@ -133,6 +127,17 @@ async function processFile(file) {
         alert(err.message);
         resetUI();
     }
+}
+
+function processAudioFile(file) {
+    mediaFile = file;
+    if (audioPreview.src) URL.revokeObjectURL(audioPreview.src);
+    audioPreview.src = URL.createObjectURL(file);
+    uploadArea.classList.add('hidden');
+    videoPreview.classList.remove('visible');
+    audioPreview.classList.add('visible');
+    analyzeButton.disabled = false;
+    resetAnalysisUI();
 }
 
 
@@ -147,15 +152,21 @@ function handleDragLeave(event) {
 }
 
 function resetUI() {
-    videoFile = null;
+    mediaFile = null;
     analysisResult = null;
-    if (videoPreview.src) {
-        URL.revokeObjectURL(videoPreview.src);
-    }
+    currentFileType = null;
+
+    if (videoPreview.src) URL.revokeObjectURL(videoPreview.src);
+    if (audioPreview.src) URL.revokeObjectURL(audioPreview.src);
+
     videoPreview.src = '';
-    videoUpload.value = '';
+    audioPreview.src = '';
+    mediaUpload.value = '';
+
     uploadArea.classList.remove('hidden');
     videoPreview.classList.remove('visible');
+    audioPreview.classList.remove('visible');
+    
     analyzeButton.classList.remove('hidden');
     startOverButton.classList.add('hidden');
     analyzeButton.disabled = true;
@@ -172,153 +183,114 @@ function resetAnalysisUI() {
 }
 
 async function handleAnalyzeClick() {
-  if (!videoFile) {
-    alert('Please select a video file first.');
-    return;
-  }
+  if (!mediaFile) return;
 
-  setLoading(true, 'Extracting high-quality frames...');
-  resetAnalysisUI();
+  analyzeButton.classList.add('hidden');
+  startOverButton.classList.add('hidden');
 
   try {
+      if (currentFileType === 'video') {
+          await analyzeVideo();
+      } else if (currentFileType === 'audio') {
+          await analyzeAudio();
+      }
+  } catch (error) {
+      console.error('Error during analysis:', error);
+      resultDiv.classList.remove('hidden');
+      resultVerdict.textContent = 'Analysis Error';
+      resultReasoning.textContent = `An error occurred: ${error.message}. Please try a different file.`;
+      resultDiv.classList.add('result-uncertain');
+  } finally {
+      setLoading(false);
+      startOverButton.classList.remove('hidden');
+  }
+}
+
+async function analyzeVideo() {
+    setLoading(true, 'Extracting high-quality frames...');
+    resetAnalysisUI();
     const frames = await extractFramesFromVideo(videoPreview, 10);
     displayFrames(frames);
     
-    // Stage 1: Per-Frame Analysis
     const frameAnalysisResults = [];
-    const frameAnalysisSchema = {
-      type: Type.OBJECT,
-      properties: {
-        anomalies_found: {
-          type: Type.BOOLEAN,
-          description: "True if any visual anomalies were detected, otherwise false."
-        },
-        description: {
-          type: Type.STRING,
-          description: "A brief, one-sentence description of the most prominent anomaly or observation in the frame. If none, state that the frame appears natural."
-        }
-      },
-      required: ["anomalies_found", "description"]
-    };
-
-    const frameAnalysisInstruction = "You are a forensic image analyst. Your task is to examine this single image for any signs of digital manipulation or AI generation. Focus on artifacts like unnatural textures (skin, background), lighting inconsistencies, and structural impossibilities. Report your findings concisely in the requested JSON format.";
+    const frameAnalysisSchema = { type: Type.OBJECT, properties: { anomalies_found: { type: Type.BOOLEAN }, description: { type: Type.STRING } }, required: ["anomalies_found", "description"] };
+    const frameAnalysisInstruction = "You are a forensic image analyst. Examine this single image for signs of digital manipulation or AI generation. Focus on unnatural textures, lighting inconsistencies, and structural impossibilities. Report findings concisely in JSON.";
 
     for (let i = 0; i < frames.length; i++) {
-        const originalMessage = `Stage 1: Analyzing frame ${i + 1} of ${frames.length}...`;
-        setLoading(true, originalMessage);
-        
-        const request = {
-            model: model,
-            contents: [{ parts: [
-                { text: "Analyze the following image based on your instructions." },
-                { inlineData: { mimeType: 'image/jpeg', data: frames[i].split(',')[1] }}
-            ]}],
-            config: {
-                systemInstruction: frameAnalysisInstruction,
-                responseMimeType: 'application/json',
-                responseSchema: frameAnalysisSchema
-            }
-        };
-
-        const response = await generateContentWithRetry(request, {
-            onRetry: (attempt, max) => {
-                 setLoading(true, `Frame ${i + 1}: Model busy, retrying... (${attempt}/${max})`);
-            }
-        });
-        
-        const resultText = response.text;
-        const parsedResult = JSON.parse(resultText);
+        setLoading(true, `Stage 1: Analyzing frame ${i + 1} of ${frames.length}...`);
+        const request = { model, contents: [{ parts: [ { text: "Analyze the following image." }, { inlineData: { mimeType: 'image/jpeg', data: frames[i].split(',')[1] }} ]}], config: { systemInstruction: frameAnalysisInstruction, responseMimeType: 'application/json', responseSchema: frameAnalysisSchema } };
+        const response = await generateContentWithRetry(request, { onRetry: (attempt, max) => setLoading(true, `Frame ${i + 1}: Model busy, retrying... (${attempt}/${max})`) });
+        const parsedResult = JSON.parse(response.text);
         frameAnalysisResults.push(`Frame ${i + 1}: ${parsedResult.description}`);
     }
 
-    // Stage 2: Synthesis
-    const synthesisOriginalMessage = 'Stage 2: Synthesizing findings...';
-    setLoading(true, synthesisOriginalMessage);
-    const synthesisInstruction = `You are a world-class lead digital forensics investigator. Your team of analysts has provided the following observations for 10 sequential frames from a video. Your task is to perform a differential analysis and produce a final, conclusive report.
+    setLoading(true, 'Stage 2: Synthesizing findings...');
+    const synthesisInstruction = `You are a lead digital forensics investigator. Review these 10 sequential frame analysis reports. Perform a differential analysis.
+    1. Identify the single strongest evidence for 'AI Generated' and for 'Authentic Video'.
+    2. Explain how you weighed these indicators to reach a conclusion.
+    3. Render a final verdict: 'AI Generated', 'Authentic Video', or 'Inconclusive'.
+    Output a JSON object using the provided schema.`;
+    const synthesisSchema = { type: Type.OBJECT, properties: { verdict: { type: Type.STRING }, confidence_score: { type: Type.STRING }, key_evidence_for_ai: { type: Type.STRING }, key_evidence_for_real: { type: Type.STRING }, final_synthesis: { type: Type.STRING } }, required: ['verdict', 'confidence_score', 'key_evidence_for_ai', 'key_evidence_for_real', 'final_synthesis'] };
+    const synthesisPrompt = `Frame reports:\n${frameAnalysisResults.join('\n')}\n\nGenerate the final forensic report in JSON.`;
+    const finalRequest = { model, contents: [{ parts: [{text: synthesisPrompt}] }], config: { systemInstruction: synthesisInstruction, responseMimeType: 'application/json', responseSchema: synthesisSchema } };
+    const finalResponse = await generateContentWithRetry(finalRequest, { onRetry: (attempt, max) => setLoading(true, `Synthesis: Model busy, retrying... (${attempt}/${max})`) });
+    
+    const parsedData = JSON.parse(finalResponse.text);
+    analysisResult = parsedData;
+    displayResult(parsedData, 'video');
+}
 
-**Core Directives:**
-1.  **Analyze Holistically:** Review all analyst reports to identify patterns, especially temporal inconsistencies between frames.
-2.  **Identify Key Indicators:** From the evidence, you MUST identify the single strongest piece of evidence suggesting the video is **AI Generated** and the single strongest piece of evidence suggesting it is **Authentic**. If no strong evidence exists for one side, state "None found."
-3.  **Weigh the Evidence:** In your final synthesis, you MUST explain how you weighed these two key indicators against each other to arrive at your conclusion. For example, is temporal instability (flickering background) more significant than consistent lighting?
-4.  **Render a Decisive Verdict:** Based on this weighing of evidence, provide a verdict. It MUST be one of: 'AI Generated', 'Authentic Video', or 'Inconclusive'. Use 'Inconclusive' only when the key indicators are of equal and contradictory weight.
+async function analyzeAudio() {
+    setLoading(true, 'Analyzing audio...');
+    resetAnalysisUI();
+    
+    const fileToBase64 = (file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = error => reject(error);
+    });
 
-**Final output must be a JSON object adhering strictly to the provided schema.**`;
+    const audioData = await fileToBase64(mediaFile);
 
-    const synthesisSchema = {
+    const audioAnalysisInstruction = `You are a world-class forensic audio analyst. Analyze this audio clip for signs of AI-generated speech. Focus on unnatural cadence, lack of breaths, uniform pitch, or metallic artifacts.
+    1. Identify the single strongest evidence for 'AI Generated' and for 'Authentic Audio'.
+    2. Explain how you weighed these indicators.
+    3. Render a final verdict: 'AI Generated', 'Authentic Audio', or 'Inconclusive'.
+    Output a JSON object using the provided schema.`;
+
+    const audioAnalysisSchema = {
         type: Type.OBJECT,
         properties: {
-            verdict: {
-                type: Type.STRING,
-                description: "The final verdict. Must be one of: 'AI Generated', 'Authentic Video', 'Inconclusive'."
-            },
-            confidence_score: {
-                type: Type.STRING,
-                description: "Your confidence in the verdict as a percentage (e.g., '95%')."
-            },
-            key_evidence_for_ai: {
-                type: Type.STRING,
-                description: "A brief description of the single most compelling piece of evidence suggesting AI generation. State 'None found' if applicable."
-            },
-            key_evidence_for_real: {
-                type: Type.STRING,
-                description: "A brief description of the single most compelling piece of evidence suggesting the video is authentic. State 'None found' if applicable."
-            },
-            final_synthesis: {
-                type: Type.STRING,
-                description: "A concise, final analysis explaining how you weighed the key evidence to reach your verdict."
-            }
+            verdict: { type: Type.STRING, description: "Must be 'AI Generated', 'Authentic Audio', or 'Inconclusive'." },
+            confidence_score: { type: Type.STRING },
+            key_evidence_for_ai: { type: Type.STRING },
+            key_evidence_for_real: { type: Type.STRING, description: "Evidence for authentic audio." },
+            final_synthesis: { type: Type.STRING }
         },
         required: ['verdict', 'confidence_score', 'key_evidence_for_ai', 'key_evidence_for_real', 'final_synthesis']
     };
 
-    const synthesisPrompt = `Here are the frame-by-frame analysis reports:\n${frameAnalysisResults.join('\n')}\n\nNow, generate the final, synthesized forensic report in JSON format.`;
-    
-    const finalRequest = {
-      model: model,
-      contents: [{ parts: [{text: synthesisPrompt}] }],
-      config: {
-        systemInstruction: synthesisInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: synthesisSchema
-      }
-    };
-
-    const finalResponse = await generateContentWithRetry(finalRequest, {
-         onRetry: (attempt, max) => {
-            setLoading(true, `Synthesis: Model busy, retrying... (${attempt}/${max})`);
+    const request = {
+        model,
+        contents: [{ parts: [
+            { text: "Analyze this audio file." },
+            { inlineData: { mimeType: mediaFile.type, data: audioData }}
+        ]}],
+        config: {
+            systemInstruction: audioAnalysisInstruction,
+            responseMimeType: 'application/json',
+            responseSchema: audioAnalysisSchema
         }
+    };
+    
+    const response = await generateContentWithRetry(request, {
+        onRetry: (attempt, max) => setLoading(true, `Audio analysis: Model busy, retrying... (${attempt}/${max})`)
     });
 
-    let parsedData = null;
-    try {
-        const fullText = finalResponse.text;
-        parsedData = JSON.parse(fullText);
-        analysisResult = parsedData;
-    } catch(e) {
-        console.error("Failed to parse JSON response from AI", e, finalResponse.text);
-    }
-
-    if (parsedData) {
-        resultDiv.classList.remove('hidden');
-        displayResult(parsedData);
-    } else {
-        resultDiv.classList.remove('hidden');
-        resultVerdict.textContent = 'Error';
-        resultReasoning.textContent = "The AI model returned an empty or invalid response during the final synthesis. This may be due to a content safety policy or a network issue.";
-        resultDiv.classList.add('result-uncertain');
-    }
-
-  } catch (error) {
-    console.error('Error during analysis:', error);
-    resultDiv.classList.remove('hidden');
-    resultVerdict.textContent = 'Analysis Error';
-    resultReasoning.textContent = `An error occurred: ${error.message}. Please try a different video.`;
-    resultDiv.classList.add('result-uncertain');
-  } finally {
-    setLoading(false);
-    analyzeButton.classList.add('hidden');
-    startOverButton.classList.remove('hidden');
-  }
+    const parsedData = JSON.parse(response.text);
+    analysisResult = parsedData;
+    displayResult(parsedData, 'audio');
 }
 
 function displayFrames(frames) {
@@ -332,12 +304,14 @@ function displayFrames(frames) {
     });
 }
 
-function displayResult(result) {
+function displayResult(result, fileType) {
+    resultDiv.classList.remove('hidden');
     const { verdict, confidence_score, key_evidence_for_ai, key_evidence_for_real, final_synthesis } = result;
 
     resultVerdict.textContent = verdict;
     resultConfidence.textContent = confidence_score;
-    resultConfidence.classList.remove('hidden');
+    
+    const evidenceForRealLabel = fileType === 'video' ? 'Key Evidence for Authentic Video' : 'Key Evidence for Authentic Audio';
 
     const reasoningHtml = `
       <p>${final_synthesis}</p>
@@ -347,20 +321,17 @@ function displayResult(result) {
           <p>${key_evidence_for_ai}</p>
         </li>
         <li>
-          <strong>Key Evidence for Authentic Video</strong>
+          <strong>${evidenceForRealLabel}</strong>
           <p>${key_evidence_for_real}</p>
         </li>
       </ul>
     `;
-
     resultReasoning.innerHTML = reasoningHtml;
-    
-    toggleReasoningButton.classList.add('hidden');
     
     resultDiv.classList.remove('result-ai', 'result-authentic', 'result-uncertain');
     if (verdict === 'AI Generated') {
         resultDiv.classList.add('result-ai');
-    } else if (verdict === 'Authentic Video') {
+    } else if (verdict.includes('Authentic')) {
         resultDiv.classList.add('result-authentic');
     } else { // 'Inconclusive'
         resultDiv.classList.add('result-uncertain');
@@ -369,17 +340,14 @@ function displayResult(result) {
 
 async function copyResultsToClipboard() {
     if (!analysisResult) return;
-
     const { verdict, confidence_score, final_synthesis, key_evidence_for_ai, key_evidence_for_real } = analysisResult;
-    
-    const textToCopy = `Verdict: ${verdict} (${confidence_score})\n\nFinal Synthesis: ${final_synthesis}\n\n- Key Evidence for AI Generation: ${key_evidence_for_ai}\n- Key Evidence for Authentic Video: ${key_evidence_for_real}`;
+    const evidenceType = currentFileType === 'video' ? 'Authentic Video' : 'Authentic Audio';
+    const textToCopy = `Verdict: ${verdict} (${confidence_score})\n\nFinal Synthesis: ${final_synthesis}\n\n- Key Evidence for AI Generation: ${key_evidence_for_ai}\n- Key Evidence for ${evidenceType}: ${key_evidence_for_real}`;
     try {
         await navigator.clipboard.writeText(textToCopy);
         const originalIcon = copyButton.innerHTML;
         copyButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
-        setTimeout(() => {
-            copyButton.innerHTML = originalIcon;
-        }, 2000);
+        setTimeout(() => { copyButton.innerHTML = originalIcon; }, 2000);
     } catch (err) {
         console.error('Failed to copy text: ', err);
     }
@@ -388,17 +356,12 @@ async function copyResultsToClipboard() {
 async function handleShareClick() {
     try {
         resultDiv.classList.add('capturing');
-        const canvas = await html2canvas(resultDiv, {
-             backgroundColor: '#1e1e1e',
-             useCORS: true,
-             scale: 2
-        });
+        const canvas = await html2canvas(resultDiv, { backgroundColor: '#1e1e1e', useCORS: true, scale: 2 });
         resultDiv.classList.remove('capturing');
-
         const imageURL = canvas.toDataURL('image/png');
         const a = document.createElement('a');
         a.href = imageURL;
-        a.download = 'ai-video-analysis.png';
+        a.download = `media-forensic-lab-${currentFileType}-analysis.png`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
@@ -409,63 +372,28 @@ async function handleShareClick() {
 }
 
 function handleDownloadReportClick() {
-    if (!analysisResult || extractedFramesData.length === 0) {
-        alert('No analysis results to download.');
-        return;
-    }
-
+    if (!analysisResult) return;
     const { verdict, confidence_score, final_synthesis, key_evidence_for_ai, key_evidence_for_real } = analysisResult;
+    const evidenceType = currentFileType === 'video' ? 'Authentic Video' : 'Authentic Audio';
 
-    const findingsHtml = `
-        <ul>
-            <li><strong>Key Evidence for AI Generation:</strong> ${key_evidence_for_ai}</li>
-            <li><strong>Key Evidence for Authentic Video:</strong> ${key_evidence_for_real}</li>
-        </ul>
-    `;
+    const findingsHtml = `<ul><li><strong>Key Evidence for AI Generation:</strong> ${key_evidence_for_ai}</li><li><strong>Key Evidence for ${evidenceType}:</strong> ${key_evidence_for_real}</li></ul>`;
     
-    const framesHtml = extractedFramesData.map(frame => 
+    const framesHtml = currentFileType === 'video' ? extractedFramesData.map(frame => 
         `<img src="${frame}" alt="Analyzed Frame" style="width: 100%; max-width: 200px; border-radius: 8px; margin: 5px; border: 1px solid #ddd;">`
-    ).join('');
+    ).join('') : '';
+    
+    const framesSection = currentFileType === 'video' ? `<div class="frames"><h2>Analyzed Frames</h2><div class="frames-grid">${framesHtml}</div></div>` : '';
 
     const reportHtml = `
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>AI Video Analysis Report</title>
-            <style>
-                body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 2rem auto; padding: 2rem; border: 1px solid #eee; border-radius: 12px; }
-                h1, h2, h3 { color: #111; }
-                .result { border: 1px solid #ddd; padding: 1.5rem; border-radius: 12px; margin-bottom: 2rem; }
-                .result p { margin-top: 0; }
-                .result ul { padding-left: 20px; }
-                .frames { margin-top: 2rem; }
-                .frames-grid { display: flex; flex-wrap: wrap; gap: 10px; }
-            </style>
-        </head>
-        <body>
-            <h1>AI Video Analysis Report</h1>
-            <div class="result">
-                <h2>Forensic Analysis</h2>
-                <p><strong>Verdict:</strong> ${verdict} (${confidence_score})</p>
-                <p><strong>Final Synthesis:</strong> ${final_synthesis}</p>
-                <h3>Key Evidence</h3>
-                ${findingsHtml}
-            </div>
-            <div class="frames">
-                <h2>Analyzed Frames</h2>
-                <div class="frames-grid">${framesHtml}</div>
-            </div>
-        </body>
-        </html>
-    `;
+        <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Media Forensic Lab Analysis Report</title>
+        <style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;line-height:1.6;color:#333;max-width:800px;margin:2rem auto;padding:2rem;border:1px solid #eee;border-radius:12px;}h1,h2{color:#111;}.result{border:1px solid #ddd;padding:1.5rem;border-radius:12px;margin-bottom:2rem;}.frames-grid{display:flex;flex-wrap:wrap;gap:10px;}</style></head>
+        <body><h1>Media Forensic Lab: ${currentFileType.charAt(0).toUpperCase() + currentFileType.slice(1)} Analysis Report</h1><div class="result"><h2>Forensic Analysis</h2><p><strong>Verdict:</strong> ${verdict} (${confidence_score})</p><p><strong>Final Synthesis:</strong> ${final_synthesis}</p><h3>Key Evidence</h3>${findingsHtml}</div>${framesSection}</body></html>`;
 
     const blob = new Blob([reportHtml], { type: 'text/html' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'ai-video-analysis-report.html';
+    a.download = `media-forensic-lab-${currentFileType}-analysis-report.html`;
     document.body.appendChild(a);
 a.click();
     document.body.removeChild(a);
@@ -476,41 +404,32 @@ function extractFramesFromVideo(video, frameCount) {
   return new Promise(async (resolve, reject) => {
     const canvas = document.createElement('canvas');
     const context = canvas.getContext('2d');
-    const frames = [];
+    if (!context) return reject(new Error('Canvas context could not be created.'));
     
-    if (video.readyState < 1) {
-      await new Promise(res => video.addEventListener('loadedmetadata', res, { once: true }));
-    }
+    if (video.readyState < 1) await new Promise(res => video.addEventListener('loadedmetadata', res, { once: true }));
     
     const duration = video.duration;
-
-    if (!context || !duration || isNaN(duration) || duration === Infinity) {
-      reject(new Error('Invalid video metadata. The video may be corrupt or in an unsupported format.'));
-      return;
-    }
+    if (!duration || isNaN(duration) || duration === Infinity) return reject(new Error('Invalid video metadata.'));
 
     video.pause();
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     
+    const frames = [];
     let framesExtracted = 0;
-    
     const onSeeked = async () => {
       if (framesExtracted < frameCount) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
         frames.push(canvas.toDataURL('image/jpeg', 0.9));
         framesExtracted++;
-
         if (framesExtracted < frameCount) {
-            const nextTime = (duration / (frameCount + 1)) * (framesExtracted + 1);
-            video.currentTime = nextTime;
+            video.currentTime = (duration / (frameCount + 1)) * (framesExtracted + 1);
         } else {
             video.removeEventListener('seeked', onSeeked);
             resolve(frames);
         }
       }
     };
-    
     video.addEventListener('seeked', onSeeked);
     video.currentTime = duration / (frameCount + 1);
   });
@@ -524,9 +443,7 @@ function setLoading(isLoading, message = 'Analyzing...') {
     analyzeButton.textContent = 'Analyzing...';
   } else {
     loader.classList.add('hidden');
-    if (videoFile) {
-        analyzeButton.disabled = false;
-    }
-    analyzeButton.textContent = 'Analyze Video';
+    if (mediaFile) analyzeButton.disabled = false;
+    analyzeButton.textContent = 'Analyze';
   }
 }
