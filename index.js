@@ -27,7 +27,7 @@ let currentFileType = null;
 let extractedFramesData = [];
 let analysisResult = null;
 
-const ai = new GoogleGenAI({ apiKey: "AIzaSyAkuDOerSFcd9iKspmSthRkHy6M5AzvNhw" });
+const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
 const model = 'gemini-2.5-flash';
 
 mediaUpload.addEventListener('change', handleFileSelect);
